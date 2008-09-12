@@ -2,7 +2,7 @@
 
 = sd_clust version 0.1.0 pre-alpha =
 
-Usage: sd_clust _[options_] <filename>
+Usage: sd_clust \[options\] <filename>
 
   [options]
     -v, --version        : show version number (stdout)
