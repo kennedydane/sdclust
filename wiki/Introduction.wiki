@@ -2,7 +2,7 @@
 
 = Introduction =
 
-Expressed Sequence Tags, or ESTs, represent an artificial data set derived from sequenced mRNA. As such they provide insight into the transcriptome of many organisms. They are particularly useful when trying to find genes in organisms whose genome has not yet been sequenced. An introduction to ESTs can be found <a href="http://en.wikipedia.org/wiki/Expressed_sequence_tag">here</a>.
+Expressed Sequence Tags, or ESTs, represent an artificial data set derived from sequenced mRNA. As such they provide insight into the transcriptome of many organisms. They are particularly useful when trying to find genes in organisms whose genome has not yet been sequenced. An introduction to ESTs can be found here - http://en.wikipedia.org/wiki/Expressed_sequence_tag.
 
 EST clustering is an important step in the process of going from the biological sample to the final digital data describing the expressed DNA. In particular when the cDNA clones are sequenced we generally get many copies of the same expressed sequence, however the starting and ending points can differ. The clustering stage identifies which ESTs are related to one another so that the data can be assembled and a consensus sequence identified.
 
