@@ -1,8 +1,14 @@
-#summary One-sentence summary of this page.
-A brief introduction to why you need this program
+#summary A brief introduction to why you need this program
+
 = Introduction =
 
-Add your content here.
+Expressed Sequence Tags, or ESTs, represent an artificial data set derived from sequenced mRNA. As such they provide insight into the transcriptome of many organisms. They are particularly useful when trying to find genes in organisms whose genome has not yet been sequenced. An introduction to ESTs can be found <a href="http://en.wikipedia.org/wiki/Expressed_sequence_tag">here</a>.
+
+EST clustering is an important step in the process of going from the biological sample to the final digital data describing the expressed DNA. In particular when the cDNA clones are sequenced we generally get many copies of the same expressed sequence, however the starting and ending points can differ. The clustering stage identifies which ESTs are related to one another so that the data can be assembled and a consensus sequence identified.
+
+There are a number of difficulties when doing the clustering. Firstly there is a lot of data. And since we need to find which ESTs match one another this quadratic complexity can result in very long computation times. Secondly the data can contain errors, which means that exact matches between two related sequences are rare.
+
+This program aims to tackle these problems using several tactics. Firstly to handle the complexity issues, potential matches are identified when they have a certain number of matches in common. Since sequences from different portions of expressed DNA are less likely to have a large number of common words, this means that unnecessary comparisons are avoided. The problem with the error prone data is dealt with in the final comparison where the d2 distance measure is used. This comparison is a validated method that uses word frequencies to determine sequence similarity. 
 
 
 = Details =
