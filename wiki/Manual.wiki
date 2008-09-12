@@ -1,0 +1,76 @@
+#summary A brief manual on using sd_clust
+
+= sd_clust version 0.1.0 pre-alpha =
+
+Usage: sd_clust [options] <filename>
+
+  [options]
+    -v, --version        : show version number (stdout)
+    -h, --help           : show this help screen (stdout)
+    -p, --progress       : show percentage progress (stderr)
+    -f, --fasta          : show summary about the fasta sequences (stderr)
+
+    -c, --show_compact   : show the compact cluster table (stdout)
+    -C, --show_extended  : show the extended cluster table (stdout)
+    -q, --single         : do single linkage clustering (default)
+    -Q, --complete       : find all overlapping ESTs
+    -n, --no_rc          : don't evaluate reverse compliment
+    -H, --heur_only      : cluster based on heuristics only
+
+    -S, --skip <int>     : set number of words to skip (default = 10)
+    -s, --sd <float>     : set standard deviation threshold (default = 4)
+    -t, --wc_thresh <int>: set word count threshold (default = 3)
+    -w, --word_len <int> : set word length (default = 14)
+
+    -L, --d2_l <int>     : set d2 window length (default = 100)
+    -T, --d2_t <int>     : set d2 threshold (default = 40)
+    -W, --d2_w <int>     : set d2 word length (default = 6)
+
+    -e, --compare        : Find d2 score of two sequences (stdout)
+    -E, --compare_all    : Find d2 score of every pair of sequences and
+                           outputs successfull matches in -C format (stdout)
+    -1, --1 <int>        : first sequence to be compared (default = 0)
+    -2, --2 <int>        : second sequence to be compared (default = 1)
+
+  <filename> is a fasta formated file of sequences
+
+Notes:
+  1. The format of the compact cluster table (-c) is simply that each line
+     contains all the sequences in the cluster. Sequences are numbered from 0
+     and each line is terminated with a ".".
+  2. The format of the extended cluster table (-C) is each line is a tab
+     separated list of:
+       Sequence1        Sequence2       ReverseComplement       d2Score
+     where Sequence1 and Sequence2 are the numbers of the sequences in the
+     file (starting at 0), ReverseComplement indicates whether the match was
+     with the reverse complement (0=no, 1=yes) and d2Score indicates the d2
+     score between the sequences.
+  3. Each time sd_clust finishes an analysis it appends the log file
+     (sd_clust.log). The line it appends the following info:
+       f_name w_thresh w_size sd_thresh skip_val secs heur_pass d1_pass d2_pass
+     where f_name is the fasta file's name, w_thresh is the heuristic's
+     word count threshold, w_size is the heuristic's word size, sd_thresh
+     is the standard deviation threshold, skip_val specifies every
+     skip_valth word to check, secs is the time to complete, heur_pass
+     is the number of potential matches the heuristic found, d1 pass is
+     is the number of times the d1 heuristic passes and d2_pass is the
+     number of matches that were found.
+
+Examples:
+  sd_clust -c my_seqences.fasta
+    This will use the default d2 and sd options and output the compact cluster
+    table to standard output.
+
+  sd_clust -C -Q mysequences.fasta
+    This will output the extended cluster table showing all overlaps between
+    ESTs.
+
+  sd_clust -c -t 20 -w 16 -s 2.0 -S 3 -n my_sequences.fasta
+    This changes the heuristic to use a word length of 16, a word count
+    threshold of 20, a standard deviation threshold of 2 and  it only checks
+    every 3rd word, but doesn't check the reverse complement. Compact cluster
+    table is output.
+
+  sd_clust -e -1 34 -2 83 my_sequences.fasta
+    This will calculate the d2 score between sequence #34 and sequence #83.
+    Note that sequences are numbered from 0.
