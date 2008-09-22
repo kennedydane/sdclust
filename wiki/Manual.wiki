@@ -4,7 +4,7 @@
 
 Usage: sd_clust `[`options`]` <filename>
 
-  '['options']'
+  `[`options`]`
     -v, --version        : show version number (stdout)
     -h, --help           : show this help screen (stdout)
     -p, --progress       : show percentage progress (stderr)
