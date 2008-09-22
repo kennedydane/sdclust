@@ -175,7 +175,8 @@ void parseCommandLine(int argc, char* argv[]) {
 }
 
 void show_version() {
-  cout << "sd_clust version " << globals::version << "\n" << flush;
+  cout << "sd_clust version " << globals::version << "\n";
+  cout << "For any questions contact kennedy" << ".dane" << "@" << "gmail." << "com\n" << flush;
 }
 
 void show_help() {
