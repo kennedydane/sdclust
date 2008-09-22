@@ -52,7 +52,7 @@ bool     globals::range             = false;
 bool     globals::heuristic_only    = false;
 bool     globals::do_rc             = true;
 ofstream globals::scores_comparison;
-string   globals::version           = "0.1.0 pre-alpha";
+string   globals::version           = "0.1.1 pre-alpha";
 
 uint32_t globals::A_count=0;
 uint32_t globals::C_count=0;
