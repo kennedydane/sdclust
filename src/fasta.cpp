@@ -628,8 +628,15 @@ uint32_t fasta::count_sequences() {
   //NOT BULLETPROOF IN THE SLIGHTEST
   uint32_t counter = 0;
   for (uint32_t i = 0; i < this->size; i++)
-    if (this->buffer[i] == '>')
-      counter++;
+    if (this->buffer[i] == '>') {
+      if (i==0) {
+        counter++;
+      }
+      else if (buffer[i-1] == '\n') {
+        counter++;
+
+      }
+    }
   return counter;
   
 }
