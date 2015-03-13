@@ -1,0 +1,1 @@
+sd\_clust uses indexing and word frequencies to rapidly predict potentially linked pairs of [expressed sequence tags](http://en.wikipedia.org/wiki/Expressed_sequence_tags) and then uses the d2 distance measure for fine-grained testing.
