@@ -24,6 +24,7 @@
 #include <iostream>
 #include <fstream>
 #include <cassert>
+#include <cstring>
 #include <sys/types.h>
 
 #define MAX(i,j) (i>j?i:j)
