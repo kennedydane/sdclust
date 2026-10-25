@@ -43,36 +43,24 @@
 
 bool match::thresholds_set = false;
 uint8_t match::matches_threshold = 0;
-//float match::sd_threshold = 0;
 float match::var_threshold = 0;
-int16_t match::delta1[65536];
-int16_t match::delta2[65536];
-int16_t match::num_words1[65536];
-int16_t match::num_words2[65536];
 
 match::match() {
   this->positions=NULL;
-}
-
-match::match(uint8_t m_thresh, float sd_thresh)
-{
-  if (!this->thresholds_set) {
-    this->thresholds_set = true;
-    this->matches_threshold = m_thresh;
-    //this->sd_threshold = sd_thresh;
-    this->var_threshold = sd_thresh*sd_thresh;
-  }
-  //this->min_sd = this->sd_thresh+1;
-  this->positions = new position[this->matches_threshold];
   this->matches_count=0;
   this->match_found = false;
 }
 
-
-match::~match()
+void match::initialise(uint8_t m_thresh, float sd_thresh, position *positions)
 {
-  if (positions!=NULL)
-    delete[] positions;
+  if (!this->thresholds_set) {
+    this->thresholds_set = true;
+    this->matches_threshold = m_thresh;
+    this->var_threshold = sd_thresh*sd_thresh;
+  }
+  this->positions = positions;
+  this->matches_count=0;
+  this->match_found = false;
 }
 
 void match::reset() {
@@ -155,10 +143,10 @@ bool match::add_match(position where) {
   } 
 };*/
 
-void match::cluster(clusters *the_clusters, uint32_t source, sequence* s_seq, uint32_t target, sequence* t_seq, bool rc, d1 *d1_calc, d2 *d2_calc) {
+void match::cluster(clusters *the_clusters, uint32_t source, sequence* s_seq, uint32_t target, sequence* t_seq, bool rc, d1 *d1_calc, d2 *d2_calc, match_stats *stats, ostream &out) {
   if (this->match_found && (the_clusters->find_parent(source) != the_clusters->find_parent(target))) {
 
-    globals::heuristic_success++;
+    stats->heuristic_success++;
     uint16_t s_min, s_max, t_min, t_max;
 
     //sequence *s_seq = the_sequences->get_sequence(source);
@@ -181,7 +169,7 @@ void match::cluster(clusters *the_clusters, uint32_t source, sequence* s_seq, ui
     int32_t d2_score;
     
     if (d1_score>=globals::d1_threshold) {
-      globals::d1_success++;
+      stats->d1_success++;
       if (!globals::heuristic_only) {
         //d2_score = d2_calc->calc_score(s_seq, t_seq, 0, s_seq->get_len()-globals::d2_word_length, MAX(0,(int16_t)t_min-20), MIN(t_seq->get_len()-globals::d2_word_length,t_max+20));
         //d2_score = d2_calc->calc_score(s_seq, t_seq, 0, s_seq->get_len()-globals::d2_word_length, dummy1, dummy2);
@@ -200,11 +188,11 @@ void match::cluster(clusters *the_clusters, uint32_t source, sequence* s_seq, ui
     }*/
     if (d2_score <= globals::d2_threshold) {
       if (!globals::heuristic_only)
-        globals::d2_success++;
+        stats->d2_success++;
       if (!globals::complete) //Only put them in same cluster if doing single linkage, otherwise we're only interested in the extended table anyway
         the_clusters->make_union(source, target);
       if (globals::show_extended) {
-        cout << source << "\t" << target << "\t" << rc << "\t" << d2_score << "\n";
+        out << source << "\t" << target << "\t" << rc << "\t" << d2_score << "\n";
       }
     }
   };
@@ -212,22 +200,27 @@ void match::cluster(clusters *the_clusters, uint32_t source, sequence* s_seq, ui
 
 /************************ MATCH LIST ************************/
 
-match_list::match_list(uint32_t list_size, uint8_t m_thresh, float sd_thresh) {
+match_list::match_list(uint32_t list_size, uint8_t m_thresh, float sd_thresh, clusters *the_clusters) {
   this->list_size = list_size;
-  this->the_list = new match*[list_size];
+  this->the_list = new match[list_size];
+  this->position_pool = new position[(size_t)list_size * m_thresh];
   for (uint32_t i=0; i < list_size; i++)
-    this->the_list[i] = new match(m_thresh, sd_thresh);
+    this->the_list[i].initialise(m_thresh, sd_thresh, &this->position_pool[(size_t)i * m_thresh]);
   this->matches=new vector<uint32_t>;
-  this->the_clusters = new clusters(list_size);
+  this->the_clusters = the_clusters;
+  this->d1_calc = new d1();
+  this->d2_calc = new d2();
+  this->stats.heuristic_success = 0;
+  this->stats.d1_success = 0;
+  this->stats.d2_success = 0;
 }
 
 match_list::~match_list() {
-  for (uint32_t i=0; i < this->list_size; i++) {
-    delete this->the_list[i];
-  }
   delete[] this->the_list;
+  delete[] this->position_pool;
   delete this->matches;
-  delete this->the_clusters;
+  delete this->d1_calc;
+  delete this->d2_calc;
 }
 
 vector<uint32_t>* match_list::get_matches() {
@@ -236,43 +229,22 @@ vector<uint32_t>* match_list::get_matches() {
 
 void match_list::reset_list() {
   for (vector<uint32_t>::iterator i = this->matches->begin(); i != this->matches->end(); ++i) {
-    this->the_list[*i]->reset();
+    this->the_list[*i].reset();
   };
   this->matches->clear();
   
 }
 
 void match_list::add_match(uint32_t who_am_i, uint32_t which_seq, position where) {
-  if ((the_clusters->find_parent(who_am_i) != the_clusters->find_parent(which_seq)) && (this->the_list[which_seq]->add_match(where))) {
+  if ((the_clusters->find_parent(who_am_i) != the_clusters->find_parent(which_seq)) && (this->the_list[which_seq].add_match(where))) {
     this->matches->push_back(which_seq);
   }
   
 }
 
-/*void match_list::show_matches(uint32_t who_am_i) {
+void match_list::find_clusters(uint32_t who_am_i, sequence* the_sequence, sequence_list *the_sequences, bool rc, ostream &out) {
+  this->d1_calc->set_num_words1(the_sequence);
   for (vector<uint32_t>::iterator i = this->matches->begin(); i != this->matches->end(); ++i) {
-    this->the_list[*i]->show_match(who_am_i, *i);
+    this->the_list[*i].cluster(this->the_clusters, who_am_i, the_sequence, *i, the_sequences->get_sequence(*i), rc, this->d1_calc, this->d2_calc, &this->stats, out);
   }
-}*/
-
-void match_list::find_clusters(uint32_t who_am_i, sequence* the_sequence, sequence_list *the_sequences, bool rc, d1* d1_calc, d2 *d2_calc) {
-/*  if (!rc) {
-    d1_calc->set_num_words1(the_sequences->get_sequence(who_am_i));
-  }
-  else {
-    sequence* t_seq = the_sequences->get_sequence(who_am_i)->rc();
-    d1_calc->set_num_words1(t_seq);
-    delete t_seq;
-  }
-  for (vector<uint32_t>::iterator i = this->matches->begin(); i != this->matches->end(); ++i) {
-    this->the_list[*i]->cluster(this->the_clusters, who_am_i, *i, the_sequences, rc, d1_calc, d2_calc);
-  }*/
-  d1_calc->set_num_words1(the_sequence);
-  for (vector<uint32_t>::iterator i = this->matches->begin(); i != this->matches->end(); ++i) {
-    this->the_list[*i]->cluster(this->the_clusters, who_am_i, the_sequence, *i, the_sequences->get_sequence(*i), rc, d1_calc, d2_calc);
-  }
-}
-
-void match_list::show_clusters() {
-  this->the_clusters->show_clusters();
 }

@@ -22,6 +22,8 @@
 #define CLUSTERS_H
 
 #include <sys/types.h>
+#include <cstdint>
+#include <atomic>
 //#include "common.h"
 
 /**
@@ -30,20 +32,10 @@
 
 using namespace std;
 
-class entry {
-  public:
-    void initialise(int32_t i);
-  protected:
-    int32_t cluster; // refers to index of root
-    int32_t rank; // for find-union
-    int32_t next;
-    int32_t last;
-    int32_t match;
-    friend class clusters;
-};
-
-
-
+// A union-find table that many threads can share without locks. Each entry
+// points at its parent; a root points at itself. Unions only ever change a
+// root (with a compare-and-swap), and path halving only ever points an entry
+// at one of its ancestors, so concurrent finds and unions are safe.
 class clusters{
   public:
     clusters();
@@ -53,9 +45,9 @@ class clusters{
     void make_union(int32_t i, int32_t j);
     void show_clusters();
   private:
-    entry *the_entries;
+    atomic<int32_t> *parent;
     int32_t size;
-    int32_t total;
+    atomic<int32_t> total;
 };
 
 #endif

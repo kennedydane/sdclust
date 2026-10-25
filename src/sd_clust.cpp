@@ -56,7 +56,7 @@ void show_help();
 bool fasta_stats=false;
 void show_fasta_stats(sequence_list *the_sequences);
 
-static const char *allowed_options = "cCeEfhHnpqQvs:w:RS:t:T:W:L:1:2:";
+static const char *allowed_options = "cCeEfhHnpqQvs:w:RS:t:T:W:L:j:1:2:";
 
 bool compare_two = false;
 bool compare_all = false;
@@ -83,6 +83,7 @@ static struct option long_options[] = {
   {"d2_t",1,0,'T'},
   {"d2_l",1,0,'L'},
   {"range",0,0,'R'},
+  {"threads",1,0,'j'},
   {"1",1,0,'1'},
   {"2",1,0,'2'},
   {0, 0, 0, 0}
@@ -170,6 +171,9 @@ void parseCommandLine(int argc, char* argv[]) {
       case 'w' : //word_len
         globals::mer_size = parse_int_option("-w (word length)", optarg, 1, 32);
         break;
+      case 'j': //number of threads (0 = every core)
+        globals::threads = parse_int_option("-j (threads)", optarg, 0, 1024);
+        break;
       case 'S': //skip size
         globals::skip = parse_int_option("-S (skip)", optarg, 1, 255);
         break;
@@ -234,6 +238,8 @@ void show_help() {
   cout << "    -Q, --complete       : find all overlapping ESTs\n";
   cout << "    -n, --no_rc          : don't evaluate reverse compliment\n";
   cout << "    -H, --heur_only      : cluster based on heuristics only\n";
+  cout << "    -j, --threads <int>  : number of threads to cluster with (default = 0,\n";
+  cout << "                           which uses every core)\n";
   cout << "\n";
   cout << "    -S, --skip <int>     : set number of words to skip (default = " << (int)globals::skip << ")\n";
   cout << "    -s, --sd <float>     : set standard deviation threshold (default = " << globals::sd_threshold << ")\n";
@@ -255,14 +261,17 @@ void show_help() {
   cout << "Notes:\n";
   cout << "  1. The format of the compact cluster table (-c) is simply that each line\n";
   cout << "     contains all the sequences in the cluster. Sequences are numbered from 0\n";
-  cout << "     and each line is terminated with a \".\".\n";
+  cout << "     and each line is terminated with a \".\". Each line lists its sequences\n";
+  cout << "     in ascending order, and lines are ordered by their first sequence.\n";
   cout << "  2. The format of the extended cluster table (-C) is each line is a tab\n";
   cout << "     separated list of:\n";
   cout << "       Sequence1\tSequence2\tReverseComplement\td2Score\n";
   cout << "     where Sequence1 and Sequence2 are the numbers of the sequences in the\n";
   cout << "     file (starting at 0), ReverseComplement indicates whether the match was\n";
   cout << "     with the reverse complement (0=no, 1=yes) and d2Score indicates the d2\n";
-  cout << "     score between the sequences.\n";
+  cout << "     score between the sequences. With more than one thread and single\n";
+  cout << "     linkage, which pairs get checked depends on timing, so the table can\n";
+  cout << "     differ between runs (the clusters themselves never do).\n";
   cout << "  3. Each time sd_clust finishes an analysis it appends the log file\n";
   cout << "     (sd_clust.log). The line it appends the following info:\n";
   cout << "       f_name w_thresh w_size sd_thresh skip_val secs heur_pass d1_pass d2_pass\n";
@@ -302,6 +311,7 @@ void echoOptions() {
   cerr << "  SD Threshold     =\t" << globals::sd_threshold << "\n";
   cerr << "  Skip value       =\t" << (int)globals::skip << "\n";
   cerr << "  RC               =\t" << (int)globals::do_rc << "\n";
+  cerr << "  Threads          =\t" << globals::threads << " (0 = every core)\n";
   cerr << "  d2 threshold     =\t" << (int)globals::d2_threshold << "\n";
   cerr << "  d2 word length   =\t" << (int)globals::d2_word_length << "\n";
   cerr << "  d2 window length =\t" << (int)globals::d2_window_length << "\n";

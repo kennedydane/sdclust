@@ -59,6 +59,7 @@ public:
     static bool     heuristic_only;
     static bool     do_rc;
     static string   version;
+    static uint32_t threads;
 
     static uint32_t A_count;
     static uint32_t C_count;

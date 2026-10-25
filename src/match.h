@@ -46,59 +46,55 @@ class position {
     uint16_t source, target;
 };
 
+// Counters that each thread keeps for itself and adds to globals at the end.
+struct match_stats {
+  uint64_t heuristic_success;
+  uint64_t d1_success;
+  uint64_t d2_success;
+};
+
 class match{
   public:
     match();
-    match(uint8_t m_thresh, float sd_thresh);
-    ~match();
+    void initialise(uint8_t m_thresh, float sd_thresh, position *positions);
     void reset();
     bool add_match(position where);
-    //void show_match(uint32_t source, uint32_t target);
-    void cluster(clusters* the_clusters, uint32_t source, sequence* src_seq, uint32_t target, sequence* t_seq, bool rc, d1 *d1_calc, d2 *d2_calc);
-    //uint32_t common_words(sequence *s_seq, sequence *t_seq);
-    
-    //void set_num_words1(sequence *s_seq);
-    //int32_t d2_score(sequence *s_seq, sequence *t_seq, uint16_t s_min, uint16_t s_max, uint16_t t_min, uint16_t t_max);
+    void cluster(clusters* the_clusters, uint32_t source, sequence* src_seq, uint32_t target, sequence* t_seq, bool rc, d1 *d1_calc, d2 *d2_calc, match_stats *stats, ostream &out);
   private:
 
     static bool thresholds_set;
     static uint8_t matches_threshold;
-    //static float sd_threshold;
     static float var_threshold;
 
     uint16_t matches_count;
     bool match_found;
-    position* positions;
-    float /*sd,*/ mean, var;
-    //float min_sd;
-    //position min_pos, max_pos;
-    static int16_t delta1[65536];
-    static int16_t delta2[65536];
-    static int16_t num_words1[65536];
-    static int16_t num_words2[65536];
-//    float min_sd;
+    position* positions; // matches_threshold slots in the owning match_list's pool
+    float mean, var;
 };
 
 
 
-
+// The matching state for one thread: a match per possible target sequence,
+// plus its own d1 and d2 calculators. The cluster table is shared.
 class match_list{
   public:
-    match_list(uint32_t list_size, uint8_t m_thresh, float sd_thresh);
+    match_list(uint32_t list_size, uint8_t m_thresh, float sd_thresh, clusters *the_clusters);
     ~match_list();
     vector<uint32_t>* get_matches();
     void reset_list();
     void add_match(uint32_t who_am_i, uint32_t which_seq, position where);
-    //void show_matches(uint32_t who_am_i);
-    void find_clusters(uint32_t who_am_i, sequence* the_sequence, sequence_list *the_sequences, bool rc, d1* d1_calc, d2* d2_calc);
-    void show_clusters();
-    
+    void find_clusters(uint32_t who_am_i, sequence* the_sequence, sequence_list *the_sequences, bool rc, ostream &out);
+    match_stats* get_stats() {return &this->stats;};
 
   private:
-    match** the_list;
+    match* the_list;
+    position* position_pool;
     uint32_t list_size;
     vector<uint32_t> *matches;
     clusters* the_clusters;
+    d1 *d1_calc;
+    d2 *d2_calc;
+    match_stats stats;
 };
 
 #endif

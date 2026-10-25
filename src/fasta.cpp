@@ -31,6 +31,13 @@ then doing the clustering. This should be separated in the future.>
 #include <cctype>
 #include <sys/types.h>
 #include "globals.h"
+#include "clusters.h"
+
+#include <algorithm>
+#include <mutex>
+#include <sstream>
+#include <thread>
+#include <vector>
 
 //globals global_vars;
 
@@ -243,23 +250,30 @@ uint16_t sequence::count_mers(uint8_t mer_size) {
   return count;
 }
 
-void sequence::update_mer_count_array(uint32_t *the_array, uint8_t array_mer_size, uint8_t mer_size) {
+// Only k-mers that fit in an index entry are indexed: 20 bits for the
+// sequence (about 10^6 ESTs) and 12 bits for the position (4095 bases).
+#define INDEXABLE(my_index, j) (((my_index) < 1048575) && ((j) < 4095))
+
+void sequence::count_index_mers(uint32_t my_index, merray* the_array, uint8_t mer_size) {
   for (uint16_t i = 0; i < this->boundaries->len(); i++) {
     boundary the_boundary = this->boundaries->get_boundary(i);
-    for (uint16_t j = the_boundary.begin; j < the_boundary.end - mer_size +1; j++) {
-      the_array[this->get_word(j, mer_size) >> ((mer_size - array_mer_size) * 2)]++;
+    if (the_boundary.end - the_boundary.begin >= mer_size) {
+      for (uint16_t j = the_boundary.begin; j < the_boundary.end - mer_size + 1; j++) {
+        if (INDEXABLE(my_index, j))
+          the_array->count_mer(this->get_word(j, mer_size));
+      }
     }
   }
 }
 
-void sequence::add_mers(uint32_t my_index, merray* the_array, uint32_t *mer_count_array, uint8_t array_mer_size, uint8_t mer_size) {
+void sequence::add_mers(uint32_t my_index, merray* the_array, uint8_t mer_size) {
   for (uint16_t i = 0; i < this->boundaries->len(); i++) {
     boundary the_boundary = this->boundaries->get_boundary(i);
     if (the_boundary.end - the_boundary.begin >= mer_size) {
       for (uint16_t j=the_boundary.begin; j < the_boundary.end - mer_size + 1; j++) {
-        if ((my_index < 1048575) && (j<4095)) { //just changed my_index < 1000000
+        if (INDEXABLE(my_index, j)) {
           uint32_t index = (my_index << 12) + j; //20 bits for my_index = 10^6 possible ESTs, 12 bits for position = 4000 max EST len
-          the_array->add_mer(index, this->get_word(j, mer_size), mer_count_array, mer_size, array_mer_size);
+          the_array->add_mer(index, this->get_word(j, mer_size));
         }
       }
     }
@@ -327,30 +341,21 @@ string sequence::get_sequence() {
   return the_string.substr(0,the_string.length()-1); // Remove the last x.
 }
 
-bool sequence::find_matches(uint32_t my_index, match_list *matches, sequence_list *seq_list, merray *the_array, uint8_t mer_size) { //, bool update_search) {
-  uint32_t mer_array_index;
-  uint32_t mer_index;
-  uint32_t which_sequence;
-  uint16_t which_word;
-  uint32_t array_len = the_array->len();
+bool sequence::find_matches(uint32_t my_index, match_list *matches, sequence_list *seq_list, merray *the_array, uint8_t mer_size) {
+  uint32_t from, to;
+  bool exact = the_array->exact();
   for (uint16_t i = 0; i < this->boundaries->len(); ++i) {
     boundary the_boundary = this->boundaries->get_boundary(i);
     for (int32_t j = the_boundary.begin; j < the_boundary.end - mer_size + 1; j += globals::skip) {
       seq_word the_word = this->get_word(j, mer_size);
-      mer_array_index = seq_list->find_mer(the_word, mer_size); //, update_search);
-      mer_index = the_array->get_mer_index(mer_array_index);
-      while ((seq_list->get_mer(mer_index, mer_size) == the_word)/* && (++mer_array_index < array_len)*/) {
-        which_sequence = mer_index >> 12;
-        if ((my_index < which_sequence)) {
-          which_word = mer_index & 4095;
-          position pos = {(uint16_t)j, which_word};
-          matches->add_match(my_index, which_sequence, pos);
-        }
-        //mer_array_index++;
-        if (++mer_array_index < array_len)
-          mer_index = the_array->get_mer_index(mer_array_index);
-        else
-          break;
+      // Every occurrence of the_word in a later sequence, in sequence order.
+      the_array->find_mers(the_word, my_index, &from, &to);
+      for (uint32_t k = from; k < to; ++k) {
+        uint32_t mer_index = the_array->get_mer_index(k);
+        if (!exact && seq_list->get_mer(mer_index, mer_size) != the_word)
+          continue;
+        position pos = {(uint16_t)j, (uint16_t)(mer_index & 4095)};
+        matches->add_match(my_index, mer_index >> 12, pos);
       }
     }
   }
@@ -362,19 +367,15 @@ bool sequence::find_matches(uint32_t my_index, match_list *matches, sequence_lis
 
 sequence_list::sequence_list(fasta *the_source, uint8_t mer_size, uint8_t matches_threshold, float sd_threshold) {
   this->how_many = the_source->count_sequences();
-  //this->mer_size = mer_size;
-  this->mer_count_array = NULL;
   this->mer_array = NULL;
-  this->unique_mer_array = NULL;
+  this->the_clusters = NULL;
+  this->matches_threshold = matches_threshold;
+  this->sd_threshold = sd_threshold;
   the_source->reset();
   this->sequences = new sequence*[this->how_many];
   for (uint32_t i = 0; i < this->how_many; i++) {
     this->sequences[i] = the_source->get_sequence(mer_size);
   }
-  this->matches = new match_list(this->how_many, matches_threshold, sd_threshold);
-  this->d1_calc= new d1();
-  this->d2_calc = new d2();
-
 }
 
 sequence_list::~ sequence_list() {
@@ -382,136 +383,13 @@ sequence_list::~ sequence_list() {
     delete this->sequences[i];
   }
   delete[] this->sequences;
-  delete this->matches;
-  if (this->mer_count_array != NULL)
-    delete[] this->mer_count_array;
   if (this->mer_array != NULL)
     delete this->mer_array;
-  if (this->unique_mer_array != NULL)
-    delete[] this->unique_mer_array;
-  delete this->d1_calc;
-  delete this->d2_calc;
+  if (this->the_clusters != NULL)
+    delete this->the_clusters;
 }
-
-uint32_t sequence_list::count_mers(uint8_t mer_size) {
-  uint32_t total = 0;
-  for (uint32_t i = 0; i < this->how_many; i++)
-    total += this->sequences[i]->count_mers(mer_size);
-  return total;
-}
-
-void sequence_list::create_mer_count_array(uint8_t mer_size) {
-  //This makes mer_count_array contain the starting index for each mer...
-  if (this->mer_count_array != NULL) {
-    delete [] this->mer_count_array;
-    this->mer_count_array = NULL;
-  }
-  uint32_t array_size = 1 << (this->array_mer_size * 2);
-  this->mer_count_array = new uint32_t [array_size];
-  for (uint32_t i = 0; i < array_size; i++) {
-    this->mer_count_array[i] = 0;
-  }
-  for (uint32_t i = 0; i < this->how_many; i++) {
-    this->sequences[i]->update_mer_count_array(this->mer_count_array, array_mer_size, mer_size);
-  };
-  for (uint32_t i = array_size-1; i > 0; i--) {
-    mer_count_array[i] = mer_count_array[i-1];
-  }
-  mer_count_array[0]=0;
-  for (uint32_t i = 1; i < array_size; i++) {
-    mer_count_array[i] += mer_count_array[i-1];
-  }
-}
-
-void sequence_list::create_merray(uint8_t array_mer_size, uint8_t mer_size) {
-  this->array_mer_size = array_mer_size;
-
-  uint32_t total = this->count_mers(mer_size);
-  this->create_mer_count_array(mer_size);
-  if (this->mer_array != NULL) {
-    delete this->mer_array;
-    this->mer_array = NULL;
-  }
-  this->mer_array = new merray(total);
-  for (uint32_t i = 0; i < this->how_many; i++) {
-    this->sequences[i]->add_mers(i, this->mer_array, this->mer_count_array, array_mer_size, mer_size);
-  }
-}
-
-void sequence_list::merge_sort_mers(uint8_t array_mer_size, uint8_t mer_size) {
-  if (array_mer_size > mer_size)
-    array_mer_size = mer_size;
-  //this->create_mer_count_array();
-  this->create_merray(array_mer_size, mer_size);
-  if (array_mer_size != mer_size)
-    this->mer_array->merge_sort_mers(this, mer_size );
-  delete[] this->mer_count_array;
-  this->mer_count_array = NULL;
-}
-
-void sequence_list::print_mers(uint8_t mer_size) {
-  this->mer_array->show_mers(this, mer_size);
-}
-
-void sequence_list::create_unique_mer_array(uint8_t mer_size) {
-  this->unique_mers = this->mer_array->count_unique_mers(this, mer_size);
-  if (this->unique_mer_array != NULL)
-    delete[] this->unique_mer_array;
-  this->unique_mer_array = this->mer_array->create_unique_mer_list(this, this->unique_mers, mer_size);
-}
-
-void sequence_list::print_unique_mers(uint8_t mer_size) {
-  for (uint32_t i = 0; i < this->unique_mers; i++) {
-    this->mer_array->print_mer(this, unique_mer_array[i], mer_size);
-
-  }
-}
-
-
-
-uint32_t sequence_list::find_mer(seq_word the_mer, uint8_t mer_size) { //, bool update_search) {
-  //binary search that gives the index into mer_array of the nearest matching mer. Should also try implementing
-  //with an interpolated search...
-  uint32_t left   = 0;
-  uint32_t right  = this->unique_mers-1;
-  uint32_t middle = 0;
-  if (this->get_mer(this->mer_array->get_mer_index(unique_mer_array[left]), mer_size) == the_mer) {
-//    if ((update_search) && (unique_mer_array[left]+1 < this->mer_array->len())) {
-//      unique_mer_array[left]++;
-//    }
-    return unique_mer_array[left];
-  }
-  else if (this->get_mer(this->mer_array->get_mer_index(unique_mer_array[right]), mer_size) == the_mer) {
-//    if ((update_search) && (unique_mer_array[right]+1 < this->mer_array->len())) {
-//      unique_mer_array[right]++;
-//    }
-    return unique_mer_array[right];
-  }
-  
-  while (left+1 < right) {
-    middle = left + ((right - left) / 2);
-    seq_word found_mer = this->get_mer(this->mer_array->get_mer_index(unique_mer_array[middle]), mer_size);
-    if (found_mer < the_mer) {
-      left = middle;
-    }
-    else if (found_mer > the_mer) {
-      right = middle;
-    }
-    else {
-//      if ((update_search) && (unique_mer_array[middle]+1 < this->mer_array->len())) {
-//        ++unique_mer_array[middle];
-//      }
-      return unique_mer_array[middle];
-    }
-  }
-  return 0;
-}
-
 
 seq_word sequence_list::get_mer(uint32_t merr_index, uint8_t mer_size) {
-//  uint32_t which_sequence = merr_index >> 12;
-//  uint16_t which_word = merr_index & 4095;
-//  return this->sequences[which_sequence]->get_word(which_word);
   return this->sequences[merr_index >> 12]->get_word(merr_index & 4095, mer_size);
 }
 
@@ -521,96 +399,103 @@ string sequence_list::get_mer_s(uint32_t merr_index, uint8_t mer_size) {
   return this->sequences[which_sequence]->get_word_s(which_word, mer_size);
 }
 
-void sequence_list::update_unique_mer_array(uint32_t min_index) {
-  // This is very clever, if I do say so myself.
-
-  uint32_t mer_array_len = this->mer_array->len()-1;
-  while (((this->mer_array->get_mer_index(this->unique_mer_array[0]) >> 12) < min_index) && (this->unique_mer_array[0] < mer_array_len)) {
-    ++this->unique_mer_array[0];
-  }
-  uint32_t u_mers = 1;
-
-  for (uint32_t i=1; i < this->unique_mers; ++i) {
-    if (this->unique_mer_array[i] <= this->unique_mer_array[i-1]) {
-      this->unique_mer_array[i] = this->unique_mer_array[i-1];
-    }
-    else {
-      while (((this->mer_array->get_mer_index(this->unique_mer_array[i]) >> 12) < min_index) && (this->unique_mer_array[i] < mer_array_len)) {
-        ++this->unique_mer_array[i];
-      }
-      //++u_mers;
-      this->unique_mer_array[u_mers++] = this->unique_mer_array[i];
-
-    }
-  }
-  this->unique_mers = u_mers;
+// Runs work(thread number) on each of threads threads and waits for them all.
+template <class F> static void run_threads(uint32_t threads, F work) {
+  vector<thread> workers;
+  for (uint32_t t = 1; t < threads; t++)
+    workers.push_back(thread(work, t));
+  work(0);
+  for (uint32_t t = 0; t < workers.size(); t++)
+    workers[t].join();
 }
 
-
+static uint32_t thread_count() {
+  if (globals::threads > 0)
+    return globals::threads;
+  uint32_t cores = thread::hardware_concurrency();
+  return cores > 0 ? cores : 1;
+}
 
 void sequence_list::find_matches(uint32_t start, uint32_t end, uint8_t bucket_size, uint8_t mer_size) {
-//  this->merge_sort_mers(bucket_size, 0);
   if (start >= how_many) {
     start = 0;
   }
   if (end >= how_many) {
     end = how_many-1;
   }
+  uint32_t threads = thread_count();
   uint32_t step = how_many/100 + 1;
 
   if (globals::progress)
-    cerr << "Creating the dictionary." << flush;
-  this->merge_sort_mers(bucket_size, mer_size);
+    cerr << "Creating the dictionary (" << threads << " threads)..." << flush;
+  this->mer_array = new merray(this, bucket_size, mer_size, threads);
   if (globals::progress)
-    cerr << "." << flush;
+    cerr << ". " << flush;
 
-  this->create_unique_mer_array(mer_size);
-  if (globals::progress)
-    cerr << "." << flush;
-  
-  //this->mer_array->show_mers(this);
+  this->the_clusters = new clusters(how_many);
+  vector<match_list*> lists;
+  for (uint32_t t = 0; t < threads; t++)
+    lists.push_back(new match_list(how_many, this->matches_threshold, this->sd_threshold, this->the_clusters));
 
-  //cerr << this->unique_mers << "----" << flush;
+  // Threads take ESTs a chunk at a time, roughly in order. The extended table
+  // (-C) is buffered per chunk and printed in chunk order, so its lines come
+  // out in the same order as a single-threaded run.
+  const uint32_t chunk = 16;
+  uint32_t chunks = (end - start) / chunk + 1;
+  atomic<uint32_t> next_chunk(0);
+  mutex output_lock;
+  vector<string> done(chunks);
+  vector<bool> is_done(chunks, false);
+  uint32_t next_print = 0;
 
-  for (uint32_t i = start; i <= end; i++) {
-    if (i % step == 0) {
-      if (i % (step*2)==0) {
-        if (globals::progress)
-          cerr << "Updating dictionary." << flush;
-        update_unique_mer_array(i);
-        if (globals::progress)
-          cerr << ".. " << flush;
-      };
-      if (globals::progress)
-        cerr << (i*100)/how_many << "%... " << flush;
-    };
+  run_threads(threads, [&](uint32_t t) {
+    match_list *matches = lists[t];
+    uint32_t c;
+    while ((c = next_chunk.fetch_add(1)) < chunks) {
+      ostringstream out;
+      uint32_t first = start + c * chunk;
+      uint32_t last = first + chunk - 1 < end ? first + chunk - 1 : end;
+      for (uint32_t i = first; i <= last; i++) {
+        if (globals::progress && i % step == 0) {
+          lock_guard<mutex> guard(output_lock);
+          cerr << ((uint64_t)i*100)/how_many << "%... " << flush;
+        }
 
-    this->sequences[i]->find_matches(i, this->matches, this, this->mer_array, mer_size); //, true);
+        this->sequences[i]->find_matches(i, matches, this, this->mer_array, mer_size);
+        matches->find_clusters(i, this->sequences[i], this, false, out);
+        matches->reset_list();
 
-    //sequence::set_mer_size(8);
-    //match* a_match;
-    //a_match->set_num_words1(this->sequences[i]);
-    //sequence::set_mer_size(globals::mer_size);
+        if (globals::do_rc) {
+          sequence *temp = sequences[i]->rc();
+          temp->find_matches(i, matches, this, this->mer_array, mer_size);
+          matches->find_clusters(i, temp, this, true, out);
+          matches->reset_list();
+          delete temp;
+        };
+      }
+      if (globals::show_extended) {
+        lock_guard<mutex> guard(output_lock);
+        done[c] = out.str();
+        is_done[c] = true;
+        while (next_print < chunks && is_done[next_print]) {
+          cout << done[next_print];
+          string().swap(done[next_print]);
+          next_print++;
+        }
+      }
+    }
+  });
 
-    this->matches->find_clusters(i, this->sequences[i], this, false, this->d1_calc, this->d2_calc);
-    this->matches->reset_list();
-
-    if (globals::do_rc) {
-      sequence *temp = sequences[i]->rc();
-      temp->find_matches(i, this->matches, this, this->mer_array, mer_size);
-      //sequence::set_mer_size(8);
-      //a_match->set_num_words1(temp);
-      
-      //sequence::set_mer_size(globals::mer_size);
-
-      this->matches->find_clusters(i, temp, this, true, this->d1_calc, this->d2_calc);
-      this->matches->reset_list();
-      
-      delete temp;
-    };
+  for (uint32_t t = 0; t < threads; t++) {
+    match_stats *stats = lists[t]->get_stats();
+    globals::heuristic_success += stats->heuristic_success;
+    globals::d1_success += stats->d1_success;
+    globals::d2_success += stats->d2_success;
+    delete lists[t];
   }
+
   if (globals::show_compact)
-    this->matches->show_clusters();
+    this->the_clusters->show_clusters();
 }
 
 /************************ FASTA ************************/
@@ -746,157 +631,90 @@ fasta::~fasta()
 
 /************************ MERRAY ************************/
 
-merray::merray(uint32_t how_many)
+merray::merray(sequence_list *the_sequences, uint8_t bucket_size, uint8_t mer_size, uint32_t threads)
 {
-  this->array_len = how_many;
-  this->the_array = new unsigned int[how_many];
+  if (bucket_size > mer_size)
+    bucket_size = mer_size;
+  this->suffix_bits = 2 * (mer_size - bucket_size);
+  this->drop_bits = this->suffix_bits > 32 ? this->suffix_bits - 32 : 0;
+  this->bucket_count = 1u << (2 * bucket_size);
+  uint32_t how_many = the_sequences->len();
+
+  // Count the k-mers in each bucket (in parallel, with atomic counters)...
+  this->bucket_fill = new atomic<uint32_t>[this->bucket_count];
+  for (uint32_t b = 0; b < this->bucket_count; b++)
+    this->bucket_fill[b].store(0, memory_order_relaxed);
+  atomic<uint32_t> next_seq(0);
+  run_threads(threads, [&](uint32_t) {
+    uint32_t i;
+    while ((i = next_seq.fetch_add(64)) < how_many)
+      for (uint32_t j = i; j < how_many && j < i + 64; j++)
+        the_sequences->get_sequence(j)->count_index_mers(j, this, mer_size);
+  });
+
+  // ...turn the counts into where each bucket starts...
+  this->bucket_start = new uint32_t[this->bucket_count + 1];
+  uint32_t total = 0;
+  for (uint32_t b = 0; b < this->bucket_count; b++) {
+    this->bucket_start[b] = total;
+    total += this->bucket_fill[b].load(memory_order_relaxed);
+    this->bucket_fill[b].store(this->bucket_start[b], memory_order_relaxed);
+  }
+  this->bucket_start[this->bucket_count] = total;
+  this->array_len = total;
+  this->the_array = new uint64_t[total];
+
+  // ...drop every entry into its bucket, in whatever order the threads get there...
+  next_seq = 0;
+  run_threads(threads, [&](uint32_t) {
+    uint32_t i;
+    while ((i = next_seq.fetch_add(64)) < how_many)
+      for (uint32_t j = i; j < how_many && j < i + 64; j++)
+        the_sequences->get_sequence(j)->add_mers(j, this, mer_size);
+  });
+  delete[] this->bucket_fill;
+  this->bucket_fill = NULL;
+
+  // ...and sort each bucket. Entries are unique, so the result doesn't depend
+  // on the order they went in.
+  const uint32_t buckets_per_job = 4096;
+  atomic<uint32_t> next_bucket(0);
+  run_threads(threads, [&](uint32_t) {
+    uint32_t b;
+    while ((b = next_bucket.fetch_add(buckets_per_job)) < this->bucket_count)
+      for (uint32_t k = b; k < this->bucket_count && k < b + buckets_per_job; k++)
+        if (this->bucket_start[k+1] - this->bucket_start[k] > 1)
+          sort(this->the_array + this->bucket_start[k], this->the_array + this->bucket_start[k+1]);
+  });
 }
 
 merray::~merray()
 {
   delete[] this->the_array;
+  delete[] this->bucket_start;
 }
 
-void merray::add_mer(uint32_t mer_index, seq_word the_mer, uint32_t *mer_count_array, uint8_t mer_size, uint8_t array_mer_size) {
-  this->the_array[mer_count_array[the_mer >> (2*(mer_size - array_mer_size))]++] = mer_index;
-
+void merray::count_mer(seq_word the_mer) {
+  this->bucket_fill[the_mer >> this->suffix_bits].fetch_add(1, memory_order_relaxed);
 }
 
-void merray::show_mers() {
-  for (uint32_t i = 0; i < this->array_len; i++) {
-    cout << this->the_array[i] << " ";
-  };
+void merray::add_mer(uint32_t mer_index, seq_word the_mer) {
+  uint64_t suffix = (the_mer & ((((seq_word)1) << this->suffix_bits) - 1)) >> this->drop_bits;
+  uint32_t where = this->bucket_fill[the_mer >> this->suffix_bits].fetch_add(1, memory_order_relaxed);
+  this->the_array[where] = (suffix << 32) | mer_index;
 }
 
-void merray::show_mers(sequence_list *the_sequences, uint8_t mer_size) {
-  for (uint32_t i = 0; i < this->array_len; i++) {
-    cout << (the_array[i]>>12) << " " << (the_array[i] & 4095) << "___";
-    cout << the_sequences->get_mer_s(this->the_array[i], mer_size) << " " << flush;
-  }
+void merray::find_mers(seq_word the_mer, uint32_t after_seq, uint32_t *from, uint32_t *to) {
+  uint64_t suffix = (the_mer & ((((seq_word)1) << this->suffix_bits) - 1)) >> this->drop_bits;
+  uint32_t b = the_mer >> this->suffix_bits;
+  uint64_t *bucket_begin = this->the_array + this->bucket_start[b];
+  uint64_t *bucket_end = this->the_array + this->bucket_start[b+1];
+  // First entry for this k-mer from a sequence after after_seq. If after_seq+1
+  // doesn't fit in 20 bits the sum carries into the k-mer bits, past them all.
+  uint64_t *lo = lower_bound(bucket_begin, bucket_end, (suffix << 32) + (((uint64_t)after_seq + 1) << 12));
+  uint64_t *hi = lo;
+  while (hi < bucket_end && (*hi >> 32) == suffix)
+    ++hi;
+  *from = lo - this->the_array;
+  *to = hi - this->the_array;
 }
-
-/*
-uint64_t merray::get_mer(sequence_list *the_sequences, uint32_t mer_array_index, uint8_t which_mer) {
-  //cout << mer_index << "--" << (int)which_mer << "..." << flush;
-  return the_sequences->get_mer(this->the_array[mer_array_index], which_mer);
-}
-*/
-
-
-/*uint32_t merray::get_mer_index(uint32_t mer_array_index) {
-//   if (mer_array_index >= this->array_len) {
-//     cerr << "what the crap -- " << mer_array_index << " " << this->array_len << " " << flush;
-//   }
-  //assert(mer_array_index < this->array_len);
-   return this->the_array[mer_array_index];
-}*/
-
-
-
-void merray::print_mer(sequence_list* the_sequences, uint32_t mer_array_index, uint8_t mer_size) {
-  cout << the_sequences->get_mer_s(this->the_array[mer_array_index], mer_size) << "\n";
-}
-
-void merray::insert(sequence_list *the_sequences, uint32_t start, uint32_t finish, uint8_t mer_size) {
-  uint32_t the_val = this->the_array[finish];
-  int64_t i = finish-1;
-  while (i>=start && (the_sequences->get_mer(this->the_array[i], mer_size) > the_sequences->get_mer(the_val, mer_size))) {
-    this->the_array[i+1] = this->the_array[i];
-    i--;
-  }
-  this->the_array[i+1] = the_val;
-}
-
-void merray::insertion_sort_mers(sequence_list *the_sequences, uint32_t start, uint32_t finish, uint8_t mer_size) {
-  for (uint32_t i=start+1; i<=finish; ++i) {
-    this->insert(the_sequences, start, i, mer_size);
-  }
-}
-
-void merray::merge(sequence_list *the_sequences, uint32_t left, uint32_t right, uint8_t mer_size) {
-  //uint8_t which_mer = the_sequences->get_mer_size();
-  uint32_t middle = ((left+right)/2) + 1;
-  uint32_t t_left = left, t_middle = middle;
-  uint32_t *temp_list = new uint32_t[right-left+1];
-  for (uint32_t i = 0; i<=right-left; ++i) {
-    if ((t_left < middle) && ((t_middle > right) || (the_sequences->get_mer(this->the_array[t_left], mer_size) <= the_sequences->get_mer(this->the_array[t_middle], mer_size)))) {
-      temp_list[i] = the_array[t_left++];
-    }
-    else {
-      temp_list[i]=the_array[t_middle++];
-    }
-  }
-  for (uint32_t j = 0; j <= right-left; ++j) {
-    this->the_array[j+left] = temp_list[j];
-  };
-  delete [] temp_list;
-}
-
-void merray::merge_sort_mers(sequence_list *the_sequences, uint32_t start, uint32_t finish, uint8_t mer_size) {
-  //uint8_t which_mer = the_sequences->get_mer_size();
-  if (finish > start) {
-    uint32_t range = finish - start;
-    if (range == 1) { // move this to insertion_sort_mers????
-      if (the_sequences->get_mer(this->the_array[start], mer_size) > the_sequences->get_mer(this->the_array[finish], mer_size)) {
-        uint32_t temp = this->the_array[start];
-        this->the_array[start] = this->the_array[finish];
-        this->the_array[finish] = temp;
-      }
-    }
-    else if (range < 10) {
-      this->insertion_sort_mers(the_sequences, start, finish, mer_size);
-    }
-
-    else {
-      uint32_t middle = (finish + start)/2;
-      this->merge_sort_mers(the_sequences, start, middle, mer_size);
-      this->merge_sort_mers(the_sequences, middle+1, finish, mer_size);
-      this->merge(the_sequences, start, finish, mer_size);
-    }
-  };
-}
-
-void merray::merge_sort_mers(sequence_list *the_sequences, uint8_t mer_size) {
-  uint32_t *mer_count_array = the_sequences->get_mer_count_array();
-  uint8_t array_mer_size = the_sequences->get_array_mer_size();
-  uint32_t array_size = 1 << (array_mer_size * 2);
-
-  if (mer_count_array[0] != 0)
-    this->merge_sort_mers(the_sequences, 0, mer_count_array[0]-1, mer_size);
-
-  for (uint32_t i=1; i < array_size; ++i) {
-
-    if (mer_count_array[i-1] != mer_count_array[i])
-       this->merge_sort_mers(the_sequences, mer_count_array[i-1], mer_count_array[i]-1, mer_size);
-  }
-
-}
-
-uint32_t merray::count_unique_mers(sequence_list *the_sequences, uint8_t mer_size) {
-  uint32_t temp=1;
-  seq_word the_mer = the_sequences->get_mer(this->the_array[0], mer_size);
-  for (uint32_t i = 1; i < this->array_len; ++i) {
-    if (the_sequences->get_mer(this->the_array[i], mer_size) != the_mer) {
-      the_mer = the_sequences->get_mer(this->the_array[i], mer_size);
-      temp++;
-    }
-  }
-  return temp;
-}
-
-uint32_t* merray::create_unique_mer_list(sequence_list* the_sequences, uint32_t unique_mer_count, uint8_t mer_size) {
-  uint32_t *temp = new uint32_t[unique_mer_count];
-  seq_word the_mer = the_sequences->get_mer(this->the_array[0], mer_size);
-  temp[0]=0;
-  uint32_t counter=1;
-  for (uint32_t i = 1; i < this->array_len; ++i) {
-    if (the_sequences->get_mer(this->the_array[i], mer_size) != the_mer) {
-      the_mer = the_sequences->get_mer(this->the_array[i], mer_size);
-      temp[counter++]=i;
-    }
-  }
-  return temp;
-}
-
-
-

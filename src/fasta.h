@@ -30,6 +30,7 @@ then doing the clustering. This should be separated in the future.>
 #include <iostream>
 #include <fstream>
 #include <sys/types.h>
+#include <atomic>
 
 //#include "common.h"
 #include "match.h"
@@ -44,6 +45,7 @@ class merray; // forward declaration because of heinous class interdependencies.
 class sequence;
 class sequence_list;
 class match_list;
+class clusters;
 
 //typedef uint64_t seq_word;
 
@@ -112,8 +114,8 @@ class sequence{
     uint16_t get_len(){return this->len;};
     void print_boundaries();
     uint16_t count_mers(uint8_t mer_size);
-    void update_mer_count_array(uint32_t *the_array, uint8_t array_mer_size, uint8_t mer_size);
-    void add_mers(uint32_t my_index, merray* the_array, uint32_t *mer_count_array, uint8_t array_mer_size, uint8_t mer_size);
+    void count_index_mers(uint32_t my_index, merray* the_array, uint8_t mer_size);
+    void add_mers(uint32_t my_index, merray* the_array, uint8_t mer_size);
     seq_word get_word(uint16_t which_word, uint8_t mer_size);
     string get_word_s(uint16_t which_word, uint8_t mer_size);
     string get_sequence();
@@ -130,64 +132,44 @@ class sequence_list{
     sequence_list(fasta* the_source, uint8_t mer_size, uint8_t matches_threshold, float sd_threshold);
     void add_sequence(sequence *the_seq);
     sequence* get_sequence(uint32_t which) {return this->sequences[which];};
-    uint32_t count_mers(uint8_t mer_size);
-    
-    void merge_sort_mers(uint8_t array_mer_size, uint8_t mer_size);
-    void print_mers(uint8_t mer_size);
-    void create_unique_mer_array(uint8_t mer_size); // Creates a list of indexes into a sorted mer_array of all the unique words
-    void print_unique_mers(uint8_t mer_size);
-    uint32_t find_mer(seq_word the_mer, uint8_t mer_size); //, bool update_search = false); //returns index into mer_array
     seq_word get_mer(uint32_t merr_index, uint8_t mer_size);
-    //uint8_t get_mer_size() {return this->mer_size;};
-    uint8_t get_array_mer_size() {return this->array_mer_size;};
     string get_mer_s(uint32_t merr_index, uint8_t mer_size);
-    uint32_t* get_mer_count_array() {return this->mer_count_array;};
     uint32_t len() {return this->how_many;};
     void find_matches(uint32_t start, uint32_t end, uint8_t bucket_size, uint8_t mer_size);
     ~sequence_list();
-    //int32_t d2_score(sequence *s_seq, sequence *t_seq, uint16_t s_min, uint16_t s_max, uint16_t t_min, uint16_t t_max);
   private:
-    void create_merray(uint8_t array_mer_size, uint8_t mer_size);
-    void create_mer_count_array(uint8_t mer_size);
-    void update_unique_mer_array(uint32_t min_index);
-    uint8_t array_mer_size;
-    uint32_t unique_mers;
-    uint32_t* mer_count_array;
-    uint32_t *unique_mer_array;
     uint32_t how_many;
     merray *mer_array;
-    //uint8_t mer_size;
     sequence **sequences;
-    match_list *matches;
-    d1 *d1_calc;
-    d2 *d2_calc;
-
+    clusters *the_clusters;
+    uint8_t matches_threshold;
+    float sd_threshold;
 };
 
+// The k-mer index: one 64 bit entry for every indexed k-mer in every sequence.
+// The top bits of a k-mer pick its bucket, and each bucket holds entries of
+//   (the rest of the k-mer) << 32 | (sequence << 12 | position)
+// in sorted order. So the entries for one k-mer sit together, ordered by
+// sequence, and finding them is a direct bucket lookup plus a short binary
+// search, with no need to read the sequences themselves.
 class merray{
   public:
-    merray(uint32_t how_many);
+    merray(sequence_list *the_sequences, uint8_t bucket_size, uint8_t mer_size, uint32_t threads);
     ~merray();
-    void add_mer(uint32_t mer_index, seq_word the_mer, uint32_t *mer_count_array, uint8_t mer_size, uint8_t array_mer_size);
-    void show_mers();
-    void show_mers(sequence_list *the_sequences, uint8_t mer_size);
-    //uint64_t get_mer(sequence_list *the_sequences, uint32_t mer_array_index, uint8_t which_mer);
-    uint32_t get_mer_index(uint32_t mer_array_index) {return this->the_array[mer_array_index];};
+    void count_mer(seq_word the_mer);
+    void add_mer(uint32_t mer_index, seq_word the_mer);
+    void find_mers(seq_word the_mer, uint32_t after_seq, uint32_t *from, uint32_t *to);
+    uint32_t get_mer_index(uint32_t mer_array_index) {return (uint32_t)this->the_array[mer_array_index];};
+    bool exact() {return this->drop_bits == 0;}; // false when keys hold only part of the k-mer
     uint32_t len() {return this->array_len;};
-    void merge_sort_mers(sequence_list* the_sequences, uint8_t mer_size);
-    uint32_t count_unique_mers(sequence_list* the_sequences, uint8_t mer_size);
-    uint32_t* create_unique_mer_list(sequence_list* the_sequences, uint32_t unique_mer_count, uint8_t mer_size);
-    void print_mer(sequence_list* the_sequences, uint32_t mer_array_index, uint8_t mer_size);
   private:
-    void insertion_sort_mers(sequence_list *the_sequences, uint32_t start, uint32_t finish, uint8_t mer_size);
-    void insert(sequence_list *the_sequences, uint32_t start, uint32_t finish, uint8_t mer_size);
-    void merge_sort_mers(sequence_list* the_sequences, uint32_t start, uint32_t finish, uint8_t mer_size);
-    void merge(sequence_list* the_sequences, uint32_t left, uint32_t right, uint8_t mer_size);
-    
-    uint32_t *the_array;
+    uint64_t *the_array;
     uint32_t array_len;
-    //uint32_t *mer_counts;
-
+    uint32_t *bucket_start; // bucket b's entries are [bucket_start[b], bucket_start[b+1])
+    atomic<uint32_t> *bucket_fill; // only used while building
+    uint32_t bucket_count;
+    uint8_t suffix_bits; // bits of the k-mer below the bucket
+    uint8_t drop_bits;   // low suffix bits that don't fit in the 32 bit key
 };
 
 

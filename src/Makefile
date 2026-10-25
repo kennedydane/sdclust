@@ -1,9 +1,9 @@
 #################################################################
 CC=g++
-CFLAGS = -Wall -c
-CFLAGS_DEBUG = -Wall -g -D debug_it_
-CFLAGS_OPT = -O3 -Wall
-CFLAGS_PROF = -Wall -pg -O3
+CFLAGS = -O3 -Wall -pthread -c
+CFLAGS_DEBUG = -Wall -g -pthread -D debug_it_
+CFLAGS_OPT = -O3 -Wall -pthread
+CFLAGS_PROF = -Wall -pthread -pg -O3
 OUTPUT = sd_clust
 
 #################################################################
@@ -13,15 +13,15 @@ sources = clusters.cpp d1and2.cpp fasta.cpp globals.cpp match.cpp sd_clust.cpp
 all: ../bin/sd_clust
 
 ../bin/sd_clust: $(objects)
-	$(CC) $(objects) -o ../bin/$(OUTPUT)
+	$(CC) -pthread $(objects) -o ../bin/$(OUTPUT)
 
-clusters.o: clusters.h clusters.cpp
+clusters.o: clusters.h clusters.cpp globals.h
 	$(CC) $(CFLAGS) clusters.cpp
 
 d1and2.o: d1and2.h d1and2.cpp fasta.h globals.h
 	$(CC) $(CFLAGS) d1and2.cpp
 
-fasta.o: fasta.h fasta.cpp match.h globals.h d1and2.h
+fasta.o: fasta.h fasta.cpp match.h globals.h d1and2.h clusters.h
 	$(CC) $(CFLAGS) fasta.cpp
 
 globals.o: globals.h globals.cpp
