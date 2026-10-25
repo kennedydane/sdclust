@@ -29,6 +29,8 @@
  */
 
 #include <cstdlib>
+#include <cerrno>
+#include <cmath>
 #include <string>
 #include "fasta.h"
 #include "match.h"
@@ -43,7 +45,7 @@
 using namespace std;
 
 
-char* source_file = "";
+const char* source_file = "";
 
 //time_t ts, te;
 uint64_t ts, te; //timing variables (time start, time end)
@@ -54,7 +56,7 @@ void show_help();
 bool fasta_stats=false;
 void show_fasta_stats(sequence_list *the_sequences);
 
-static char *allowed_options = "cCeEfhHnpqQvs:w:RS:t:T:W:L:1:2:";
+static const char *allowed_options = "cCeEfhHnpqQvs:w:RS:t:T:W:L:1:2:";
 
 bool compare_two = false;
 bool compare_all = false;
@@ -86,6 +88,29 @@ static struct option long_options[] = {
   {0, 0, 0, 0}
 };
 
+// Parses an integer option and exits with a message if it isn't a whole number in [min, max].
+long long parse_int_option(const char *name, const char *value, long long min, long long max) {
+  char *end;
+  errno = 0;
+  long long result = strtoll(value, &end, 10);
+  if (errno != 0 || end == value || *end != '\0' || result < min || result > max) {
+    cerr << "sd_clust: " << name << " must be a whole number from " << min << " to " << max << " (got '" << value << "')\n";
+    exit(EXIT_FAILURE);
+  }
+  return result;
+}
+
+double parse_float_option(const char *name, const char *value, double min) {
+  char *end;
+  errno = 0;
+  double result = strtod(value, &end);
+  if (errno != 0 || end == value || *end != '\0' || !std::isfinite(result) || result < min) {
+    cerr << "sd_clust: " << name << " must be a number >= " << min << " (got '" << value << "')\n";
+    exit(EXIT_FAILURE);
+  }
+  return result;
+}
+
 void parseCommandLine(int argc, char* argv[]) {
   int opt = getopt_long(argc, argv, allowed_options, long_options, 0);
   while (opt != -1) {
@@ -115,10 +140,10 @@ void parseCommandLine(int argc, char* argv[]) {
         fasta_stats=true;
         break;
       case '1': //index of first sequence
-        first = atoi(optarg);
+        first = parse_int_option("-1", optarg, 0, UINT32_MAX);
         break;
       case '2': //index of second sequence
-        second = atoi(optarg);
+        second = parse_int_option("-2", optarg, 0, UINT32_MAX);
         break;
       case 'p' : //show _progress
         globals::progress=true;
@@ -137,34 +162,49 @@ void parseCommandLine(int argc, char* argv[]) {
         show_version();
         exit(0);
       case 's' : // sd threshold
-        globals::sd_threshold = atof(optarg);
+        globals::sd_threshold = parse_float_option("-s (sd threshold)", optarg, 0);
         break;
       case 't' : // match count threshold
-        globals::matches_threshold = atoi(optarg);
+        globals::matches_threshold = parse_int_option("-t (word count threshold)", optarg, 1, 255);
         break;
       case 'w' : //word_len
-        globals::mer_size = atoi(optarg);
+        globals::mer_size = parse_int_option("-w (word length)", optarg, 1, 32);
         break;
       case 'S': //skip size
-        globals::skip = atoi(optarg);
+        globals::skip = parse_int_option("-S (skip)", optarg, 1, 255);
         break;
       case 'T': //d2_threshold
-        globals::d2_threshold = atoi(optarg);
-        globals::d1_threshold = (2*(globals::d2_window_length-globals::d2_word_length+1)-globals::d2_threshold)/2;
+        globals::d2_threshold = parse_int_option("-T (d2 threshold)", optarg, 0, 255);
         break;
       case 'W': //d2_word length
-        globals::d2_word_length = atoi(optarg);
+        globals::d2_word_length = parse_int_option("-W (d2 word length)", optarg, 1, 12);
         globals::d1_word_length = globals::d2_word_length;
-        globals::d1_threshold = (2*(globals::d2_window_length-globals::d2_word_length+1)-globals::d2_threshold)/2;
         break;
       case 'L': //d2 window length
-        globals::d2_window_length = atoi(optarg);
+        globals::d2_window_length = parse_int_option("-L (d2 window length)", optarg, 1, 255);
         globals::d1_window_length = globals::d2_window_length;
-        globals::d1_threshold = (2*(globals::d2_window_length-globals::d2_word_length+1)-globals::d2_threshold)/2;
-      break;
+        break;
+      case '?': //unknown option or missing argument (getopt has already printed why)
+        cerr << "Try 'sd_clust --help' for more information.\n";
+        exit(EXIT_FAILURE);
     }
     opt = getopt_long(argc, argv, allowed_options, long_options, 0);
   }
+
+  // The d2 options depend on each other, so check them once they have all been read.
+  if (globals::d2_word_length >= globals::d2_window_length) {
+    cerr << "sd_clust: -W (d2 word length) must be less than -L (d2 window length)\n";
+    exit(EXIT_FAILURE);
+  }
+  int words_per_window = globals::d2_window_length - globals::d2_word_length + 1;
+  if (globals::d2_threshold > 2*words_per_window) {
+    cerr << "sd_clust: -T (d2 threshold) can be at most " << 2*words_per_window
+         << " with a window length of " << (int)globals::d2_window_length
+         << " and word length of " << (int)globals::d2_word_length << "\n";
+    exit(EXIT_FAILURE);
+  }
+  globals::d1_threshold = (2*words_per_window-globals::d2_threshold)/2;
+
   if (optind<argc) {
     source_file = argv[optind];
   }
@@ -341,6 +381,15 @@ int main(int argc, char *argv[]) {
   }
 
   if (compare_two) {
+    if (first >= the_sequences->len() || second >= the_sequences->len()) {
+      cerr << "sd_clust: -1 and -2 must be less than the number of sequences (" << the_sequences->len() << ")\n";
+      exit(EXIT_FAILURE);
+    }
+    if (the_sequences->get_sequence(first)->get_len() < globals::d2_window_length ||
+        the_sequences->get_sequence(second)->get_len() < globals::d2_window_length) {
+      cerr << "sd_clust: both sequences must be at least " << (int)globals::d2_window_length << " bases long (the d2 window length) to compare them\n";
+      exit(EXIT_FAILURE);
+    }
     //d1* d1_calc = new d1();
     d2* d2_calc = new d2();
     //sequence::set_mer_size(globals::d2_word_length);
