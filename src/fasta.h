@@ -114,8 +114,8 @@ class sequence{
     uint16_t get_len(){return this->len;};
     void print_boundaries();
     uint16_t count_mers(uint8_t mer_size);
-    void count_index_mers(uint32_t my_index, merray* the_array, uint8_t mer_size);
-    void add_mers(uint32_t my_index, merray* the_array, uint8_t mer_size);
+    void count_index_mers(uint32_t my_index, merray* the_array, uint8_t mer_size, uint32_t *partition_counts);
+    void add_mers(uint32_t my_index, merray* the_array, uint8_t mer_size, uint32_t *partition_cursors);
     seq_word get_word(uint16_t which_word, uint8_t mer_size);
     string get_word_s(uint16_t which_word, uint8_t mer_size);
     string get_sequence();
@@ -152,12 +152,17 @@ class sequence_list{
 // in sorted order. So the entries for one k-mer sit together, ordered by
 // sequence, and finding them is a direct bucket lookup plus a short binary
 // search, with no need to read the sequences themselves.
+//
+// Building it writes each entry twice: first into its partition (a run of
+// adjacent buckets), then into its bucket within the partition. Each pass
+// writes to few enough places at once to stay in cache, which is much faster
+// than dropping every entry straight into one of millions of buckets.
 class merray{
   public:
     merray(sequence_list *the_sequences, uint8_t bucket_size, uint8_t mer_size, uint32_t threads);
     ~merray();
-    void count_mer(seq_word the_mer);
-    void add_mer(uint32_t mer_index, seq_word the_mer);
+    void count_mer(seq_word the_mer, uint32_t *partition_counts);
+    void add_mer(uint32_t mer_index, seq_word the_mer, uint32_t *partition_cursors);
     void find_mers(seq_word the_mer, uint32_t after_seq, uint32_t *from, uint32_t *to);
     uint32_t get_mer_index(uint32_t mer_array_index) {return (uint32_t)this->the_array[mer_array_index];};
     bool exact() {return this->drop_bits == 0;}; // false when keys hold only part of the k-mer
@@ -168,6 +173,7 @@ class merray{
     uint32_t *bucket_start; // bucket b's entries are [bucket_start[b], bucket_start[b+1])
     atomic<uint32_t> *bucket_fill; // only used while building
     uint32_t bucket_count;
+    uint8_t partition_shift; // bucket >> partition_shift gives the bucket's partition
     uint8_t suffix_bits; // bits of the k-mer below the bucket
     uint8_t drop_bits;   // low suffix bits that don't fit in the 32 bit key
 };

@@ -254,26 +254,26 @@ uint16_t sequence::count_mers(uint8_t mer_size) {
 // sequence (about 10^6 ESTs) and 12 bits for the position (4095 bases).
 #define INDEXABLE(my_index, j) (((my_index) < 1048575) && ((j) < 4095))
 
-void sequence::count_index_mers(uint32_t my_index, merray* the_array, uint8_t mer_size) {
+void sequence::count_index_mers(uint32_t my_index, merray* the_array, uint8_t mer_size, uint32_t *partition_counts) {
   for (uint16_t i = 0; i < this->boundaries->len(); i++) {
     boundary the_boundary = this->boundaries->get_boundary(i);
     if (the_boundary.end - the_boundary.begin >= mer_size) {
       for (uint16_t j = the_boundary.begin; j < the_boundary.end - mer_size + 1; j++) {
         if (INDEXABLE(my_index, j))
-          the_array->count_mer(this->get_word(j, mer_size));
+          the_array->count_mer(this->get_word(j, mer_size), partition_counts);
       }
     }
   }
 }
 
-void sequence::add_mers(uint32_t my_index, merray* the_array, uint8_t mer_size) {
+void sequence::add_mers(uint32_t my_index, merray* the_array, uint8_t mer_size, uint32_t *partition_cursors) {
   for (uint16_t i = 0; i < this->boundaries->len(); i++) {
     boundary the_boundary = this->boundaries->get_boundary(i);
     if (the_boundary.end - the_boundary.begin >= mer_size) {
       for (uint16_t j=the_boundary.begin; j < the_boundary.end - mer_size + 1; j++) {
         if (INDEXABLE(my_index, j)) {
           uint32_t index = (my_index << 12) + j; //20 bits for my_index = 10^6 possible ESTs, 12 bits for position = 4000 max EST len
-          the_array->add_mer(index, this->get_word(j, mer_size));
+          the_array->add_mer(index, this->get_word(j, mer_size), partition_cursors);
         }
       }
     }
@@ -638,53 +638,81 @@ merray::merray(sequence_list *the_sequences, uint8_t bucket_size, uint8_t mer_si
   this->suffix_bits = 2 * (mer_size - bucket_size);
   this->drop_bits = this->suffix_bits > 32 ? this->suffix_bits - 32 : 0;
   this->bucket_count = 1u << (2 * bucket_size);
+  const uint8_t partition_bits = 2 * bucket_size < 10 ? 2 * bucket_size : 10;
+  this->partition_shift = 2 * bucket_size - partition_bits;
+  const uint32_t partitions = 1u << partition_bits;
   uint32_t how_many = the_sequences->len();
 
-  // Count the k-mers in each bucket (in parallel, with atomic counters)...
+  // Each thread takes a fixed, contiguous share of the sequences, so it can
+  // be given its own place to write in every partition.
+  vector<uint32_t> first_seq(threads + 1);
+  for (uint32_t t = 0; t <= threads; t++)
+    first_seq[t] = (uint32_t)(((uint64_t)how_many * t) / threads);
+  vector<uint32_t> per_thread((size_t)threads * partitions, 0);
+
+  // Count the k-mers in each bucket and, per thread, in each partition...
   this->bucket_fill = new atomic<uint32_t>[this->bucket_count];
   for (uint32_t b = 0; b < this->bucket_count; b++)
     this->bucket_fill[b].store(0, memory_order_relaxed);
-  atomic<uint32_t> next_seq(0);
-  run_threads(threads, [&](uint32_t) {
-    uint32_t i;
-    while ((i = next_seq.fetch_add(64)) < how_many)
-      for (uint32_t j = i; j < how_many && j < i + 64; j++)
-        the_sequences->get_sequence(j)->count_index_mers(j, this, mer_size);
+  run_threads(threads, [&](uint32_t t) {
+    for (uint32_t j = first_seq[t]; j < first_seq[t+1]; j++)
+      the_sequences->get_sequence(j)->count_index_mers(j, this, mer_size, &per_thread[(size_t)t * partitions]);
   });
 
-  // ...turn the counts into where each bucket starts...
+  // ...turn the counts into where each bucket starts, and where each thread
+  // starts writing in each partition...
   this->bucket_start = new uint32_t[this->bucket_count + 1];
   uint32_t total = 0;
   for (uint32_t b = 0; b < this->bucket_count; b++) {
     this->bucket_start[b] = total;
     total += this->bucket_fill[b].load(memory_order_relaxed);
-    this->bucket_fill[b].store(this->bucket_start[b], memory_order_relaxed);
   }
   this->bucket_start[this->bucket_count] = total;
+  delete[] this->bucket_fill;
+  this->bucket_fill = NULL;
+  for (uint32_t p = 0; p < partitions; p++) {
+    uint32_t where = this->bucket_start[p << this->partition_shift];
+    for (uint32_t t = 0; t < threads; t++) {
+      uint32_t count = per_thread[(size_t)t * partitions + p];
+      per_thread[(size_t)t * partitions + p] = where;
+      where += count;
+    }
+  }
   this->array_len = total;
   this->the_array = new uint64_t[total];
 
-  // ...drop every entry into its bucket, in whatever order the threads get there...
-  next_seq = 0;
-  run_threads(threads, [&](uint32_t) {
-    uint32_t i;
-    while ((i = next_seq.fetch_add(64)) < how_many)
-      for (uint32_t j = i; j < how_many && j < i + 64; j++)
-        the_sequences->get_sequence(j)->add_mers(j, this, mer_size);
+  // ...write every entry into its partition...
+  run_threads(threads, [&](uint32_t t) {
+    for (uint32_t j = first_seq[t]; j < first_seq[t+1]; j++)
+      the_sequences->get_sequence(j)->add_mers(j, this, mer_size, &per_thread[(size_t)t * partitions]);
   });
-  delete[] this->bucket_fill;
-  this->bucket_fill = NULL;
 
-  // ...and sort each bucket. Entries are unique, so the result doesn't depend
-  // on the order they went in.
-  const uint32_t buckets_per_job = 4096;
-  atomic<uint32_t> next_bucket(0);
+  // ...then, one partition at a time, move each entry into its bucket and
+  // sort the buckets. Entries are unique, so the result doesn't depend on the
+  // order they went in.
+  atomic<uint32_t> next_partition(0);
   run_threads(threads, [&](uint32_t) {
-    uint32_t b;
-    while ((b = next_bucket.fetch_add(buckets_per_job)) < this->bucket_count)
-      for (uint32_t k = b; k < this->bucket_count && k < b + buckets_per_job; k++)
-        if (this->bucket_start[k+1] - this->bucket_start[k] > 1)
-          sort(this->the_array + this->bucket_start[k], this->the_array + this->bucket_start[k+1]);
+    vector<uint64_t> scratch;
+    vector<uint32_t> cursor(1u << this->partition_shift);
+    uint32_t p;
+    while ((p = next_partition.fetch_add(1)) < partitions) {
+      uint32_t first_bucket = p << this->partition_shift;
+      uint32_t last_bucket = first_bucket + (1u << this->partition_shift);
+      uint64_t *begin = this->the_array + this->bucket_start[first_bucket];
+      uint64_t *end = this->the_array + this->bucket_start[last_bucket];
+      if (this->partition_shift > 0 && end - begin > 1) {
+        scratch.assign(begin, end);
+        for (uint32_t b = first_bucket; b < last_bucket; b++)
+          cursor[b - first_bucket] = this->bucket_start[b];
+        for (size_t k = 0; k < scratch.size(); k++) {
+          seq_word the_mer = the_sequences->get_mer((uint32_t)scratch[k], mer_size);
+          this->the_array[cursor[(the_mer >> this->suffix_bits) - first_bucket]++] = scratch[k];
+        }
+      }
+      for (uint32_t b = first_bucket; b < last_bucket; b++)
+        if (this->bucket_start[b+1] - this->bucket_start[b] > 1)
+          sort(this->the_array + this->bucket_start[b], this->the_array + this->bucket_start[b+1]);
+    }
   });
 }
 
@@ -694,14 +722,16 @@ merray::~merray()
   delete[] this->bucket_start;
 }
 
-void merray::count_mer(seq_word the_mer) {
-  this->bucket_fill[the_mer >> this->suffix_bits].fetch_add(1, memory_order_relaxed);
+void merray::count_mer(seq_word the_mer, uint32_t *partition_counts) {
+  uint32_t b = the_mer >> this->suffix_bits;
+  this->bucket_fill[b].fetch_add(1, memory_order_relaxed);
+  partition_counts[b >> this->partition_shift]++;
 }
 
-void merray::add_mer(uint32_t mer_index, seq_word the_mer) {
+void merray::add_mer(uint32_t mer_index, seq_word the_mer, uint32_t *partition_cursors) {
   uint64_t suffix = (the_mer & ((((seq_word)1) << this->suffix_bits) - 1)) >> this->drop_bits;
-  uint32_t where = this->bucket_fill[the_mer >> this->suffix_bits].fetch_add(1, memory_order_relaxed);
-  this->the_array[where] = (suffix << 32) | mer_index;
+  uint32_t b = the_mer >> this->suffix_bits;
+  this->the_array[partition_cursors[b >> this->partition_shift]++] = (suffix << 32) | mer_index;
 }
 
 void merray::find_mers(seq_word the_mer, uint32_t after_seq, uint32_t *from, uint32_t *to) {
