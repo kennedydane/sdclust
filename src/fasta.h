@@ -48,9 +48,12 @@ class match_list;
 //typedef uint64_t seq_word;
 
 
+// sequence lengths are stored in uint16_t
+const uint32_t MAX_SEQUENCE_LEN = 65535;
+
 class fasta{
   public:
-    fasta(char *source_file_name);
+    fasta(const char *source_file_name);
     uint32_t count_sequences();
     sequence *get_sequence(uint8_t mer_size);
     void reset();
@@ -62,6 +65,7 @@ class fasta{
     char *buffer;
     uint32_t size;
     uint32_t where;
+    uint32_t record; // index of the next sequence get_sequence will return
 };
 
 struct boundary{

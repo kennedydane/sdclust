@@ -27,6 +27,8 @@ then doing the clustering. This should be separated in the future.>
 #include <string>
 #include <math.h>
 #include <cassert>
+#include <cstdlib>
+#include <cctype>
 #include <sys/types.h>
 #include "globals.h"
 
@@ -341,7 +343,7 @@ bool sequence::find_matches(uint32_t my_index, match_list *matches, sequence_lis
         which_sequence = mer_index >> 12;
         if ((my_index < which_sequence)) {
           which_word = mer_index & 4095;
-          position pos = {j, which_word};
+          position pos = {(uint16_t)j, which_word};
           matches->add_match(my_index, which_sequence, pos);
         }
         //mer_array_index++;
@@ -613,19 +615,66 @@ void sequence_list::find_matches(uint32_t start, uint32_t end, uint8_t bucket_si
 
 /************************ FASTA ************************/
 
-fasta::fasta(char *source_file_name)
-{ this->source_file.open(source_file_name, ios::in);
+fasta::fasta(const char *source_file_name)
+{
+  this->buffer = NULL;
+  this->size = 0;
+  this->where = 0;
+  this->record = 0;
+  this->source_file.open(source_file_name, ios::in | ios::binary);
+  if (!this->source_file.is_open()) {
+    cerr << "sd_clust: cannot open '" << source_file_name << "'\n";
+    exit(EXIT_FAILURE);
+  }
   source_file.seekg(0,ios::end);
-  this->size = source_file.tellg();
+  streamoff file_size = source_file.tellg();
+  if (file_size < 0) {
+    cerr << "sd_clust: cannot read '" << source_file_name << "'\n";
+    exit(EXIT_FAILURE);
+  }
+  if (file_size == 0) {
+    cerr << "sd_clust: '" << source_file_name << "' is empty\n";
+    exit(EXIT_FAILURE);
+  }
+  if ((uint64_t)file_size > UINT32_MAX) {
+    cerr << "sd_clust: '" << source_file_name << "' is too large (limit is 4 GB)\n";
+    exit(EXIT_FAILURE);
+  }
+  this->size = (uint32_t)file_size;
   source_file.seekg(0,ios::beg);
   this->buffer = new char[size];
   source_file.read(this->buffer, this->size);
+  if ((uint32_t)source_file.gcount() != this->size) {
+    cerr << "sd_clust: failed to read '" << source_file_name << "'\n";
+    exit(EXIT_FAILURE);
+  }
   source_file.close();
-  this->where = 0;
+
+  // The first thing in the file (after blank lines and ';' comments) must be a '>' header,
+  // otherwise the sequence data before it would be silently merged into the first record.
+  uint32_t i = 0;
+  while (i < this->size) {
+    if (buffer[i] == ' ' || buffer[i] == '\t' || buffer[i] == '\r' || buffer[i] == '\n') {
+      i++;
+    }
+    else if (buffer[i] == ';' && (i == 0 || buffer[i-1] == '\n')) {
+      while (i < this->size && buffer[i] != '\n')
+        i++;
+    }
+    else
+      break;
+  }
+  if (i == this->size) {
+    cerr << "sd_clust: '" << source_file_name << "' contains no sequences\n";
+    exit(EXIT_FAILURE);
+  }
+  if (buffer[i] != '>') {
+    cerr << "sd_clust: '" << source_file_name << "' is not a FASTA file (expected a header line starting with '>')\n";
+    exit(EXIT_FAILURE);
+  }
 }
 
 uint32_t fasta::count_sequences() {
-  //NOT BULLETPROOF IN THE SLIGHTEST
   uint32_t counter = 0;
   for (uint32_t i = 0; i < this->size; i++)
     if (this->buffer[i] == '>') {
@@ -642,11 +691,21 @@ uint32_t fasta::count_sequences() {
 }
 
 sequence* fasta::get_sequence(uint8_t mer_size) {
-  // also not bullet proof. But I'll assume that people are using decent fasta files.
-  while ((buffer[where] == '>') || (buffer[where] == ';')) {
+  string header = "";
+  while ((this->where < this->size) && ((buffer[where] == '>') || (buffer[where] == ';') || isspace((unsigned char)buffer[where]))) {
+    if (isspace((unsigned char)buffer[where])) { // blank lines before or between headers
+      where++;
+      continue;
+    }
+    uint32_t line_start = where;
     where ++;
     while ((this->where < this->size) && (buffer[where-1] != '\n'))
       where++;
+    if (buffer[line_start] == '>') {
+      header.assign(&buffer[line_start], where-line_start);
+      while (!header.empty() && (header[header.length()-1] == '\n' || header[header.length()-1] == '\r'))
+        header.erase(header.length()-1);
+    }
   }
   uint32_t start = where;
   string the_sequence="";
@@ -658,12 +717,26 @@ sequence* fasta::get_sequence(uint8_t mer_size) {
     }
     where++;
   }
+  if (where-start >= 1) // last line without a trailing newline
+    the_sequence.append(&buffer[start], where-start);
+
+  if (the_sequence.empty()) {
+    cerr << "sd_clust: sequence " << this->record << " (" << header << ") is empty\n";
+    exit(EXIT_FAILURE);
+  }
+  if (the_sequence.length() > MAX_SEQUENCE_LEN) {
+    cerr << "sd_clust: sequence " << this->record << " (" << header << ") is " << the_sequence.length()
+         << " bases long; the maximum supported length is " << MAX_SEQUENCE_LEN << "\n";
+    exit(EXIT_FAILURE);
+  }
+  this->record++;
   sequence* new_sequence = new sequence(the_sequence, mer_size);
   return new_sequence;
 }
 
 void fasta::reset() {
   this->where=0;
+  this->record=0;
 }
 
 fasta::~fasta()

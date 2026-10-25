@@ -22,6 +22,7 @@
 #define GLOBALS_H
 
 #include <sys/types.h>
+#include <cstdint>
 #include <string>
 #include <iostream>
 #include <fstream>
